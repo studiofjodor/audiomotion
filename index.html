@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audiovisual Instrument - Stage 1</title>
+    
+    <!-- MediaPipe für Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <!-- Tone.js für Sound Logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; color: white; font-family: sans-serif; }
+        #canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #video { display: none; }
+        #ui { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; text-align: center; }
+        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: #fff; color: #000; border: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>Audiovisual Instrument</h1>
+        <p>Erlaube den Kamera-Zugriff und drücke Start.</p>
+        <button id="startButton">Start Experience</button>
+    </div>
+
+    <video id="video"></video>
+    <canvas id="canvas"></canvas>
+
+<script>
+/**
+ * 1. STATE MANAGER
+ * Hält die aktuellen Daten. Trennt Input von Output.
+ */
+class StateManager {
+    constructor() {
+        this.hands = []; // Array von erkannten Händen
+        this.isActive = false;
+    }
+    updateHands(landmarks) {
+        this.hands = landmarks;
+    }
+}
+
+/**
+ * 2. AUDIO CONTROLLER
+ * Nutzt Tone.js. Liest Daten aus dem StateManager.
+ */
+class AudioController {
+    constructor(state) {
+        this.state = state;
+        
+        // Simples Setup: Synth durch einen Filter
+        this.synth = new Tone.PolySynth(Tone.Synth).set({
+            oscillator: { type: "sine" },
+            envelope: { attack: 0.1, decay: 0.1, sustain: 0.8, release: 0.5 }
+        });
+        
+        this.filter = new Tone.Filter(2000, "lowpass");
+        this.synth.connect(this.filter);
+        this.filter.toDestination();
+        
+        this.isPlaying = false;
+    }
+
+    start() {
+        Tone.start(); // Wichtig für Browser-Policy
+        console.log("Audio Context gestartet");
+    }
+
+    update() {
+        if (!this.state.isActive) return;
+
+        // Wenn mindestens eine Hand da ist
+        if (this.state.hands.length > 0) {
+            const hand1 = this.state.hands[0];
+            const indexFinger = hand1[8]; // Landmark 8 ist die Zeigefingerspitze
+
+            // Mapping: Y-Achse (0.0 bis 1.0) auf Tonhöhe (inverted)
+            // Stufe 2 wird dies in eine pentatonische Skala quantisieren!
+            const pitch = 200 + ((1.0 - indexFinger.y) * 800); 
+            
+            // Mapping: X-Achse auf Filter Cutoff
+            const filterCutoff = 100 + (indexFinger.x * 4000);
+
+            if (!this.isPlaying) {
+                this.synth.triggerAttack(pitch);
+                this.isPlaying = true;
+            } else {
+                this.synth.set({ detune: 0 }); // Verhindert Klicks
+                // Gleite sanft zur neuen Frequenz
+                this.synth.setNote(pitch); 
+            }
+            
+            this.filter.frequency.rampTo(filterCutoff, 0.1);
+        } else {
+            if (this.isPlaying) {
+                this.synth.releaseAll();
+                this.isPlaying = false;
+            }
+        }
+    }
+}
+
+/**
+ * 3. VISUAL CONTROLLER
+ * Zeichnet aktuell auf 2D Canvas. Später Three.js.
+ */
+class VisualController {
+    constructor(state, canvasElement) {
+        this.state = state;
+        this.canvas = canvasElement;
+        this.ctx = this.canvas.getContext('2d');
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    update() {
+        // Hintergrund leicht transparent füllen für "Motion Trail" Effekt
+        this.ctx.fillStyle = 'rgba(17, 17, 17, 0.2)';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        if (!this.state.isActive) return;
+
+        // Zeichne abstrakte Verbindungen statt eines technischen Skeletts
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+        this.ctx.lineWidth = 2;
+
+        this.state.hands.forEach(hand => {
+            // Zeichne einen organischen Kreis um die Handmitte (Landmark 9)
+            if (hand[9]) {
+                const x = hand[9].x * this.canvas.width;
+                const y = hand[9].y * this.canvas.height;
+                
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, 40, 0, Math.PI * 2);
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                this.ctx.fill();
+                this.ctx.stroke();
+            }
+
+            // Zeigefinger Highlight
+            if (hand[8]) {
+                const ix = hand[8].x * this.canvas.width;
+                const iy = hand[8].y * this.canvas.height;
+                this.ctx.beginPath();
+                this.ctx.arc(ix, iy, 15, 0, Math.PI * 2);
+                this.ctx.fillStyle = 'white';
+                this.ctx.fill();
+            }
+        });
+    }
+}
+
+/**
+ * 4. INPUT CONTROLLER (MediaPipe)
+ * Füttert den StateManager.
+ */
+class InputController {
+    constructor(state, videoElement) {
+        this.state = state;
+        this.video = videoElement;
+        
+        this.handsDetector = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        this.handsDetector.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        
+        this.handsDetector.onResults((results) => {
+            if (results.multiHandLandmarks) {
+                this.state.updateHands(results.multiHandLandmarks);
+            } else {
+                this.state.updateHands([]);
+            }
+        });
+
+        this.camera = new Camera(this.video, {
+            onFrame: async () => {
+                if(this.state.isActive) {
+                    await this.handsDetector.send({image: this.video});
+                }
+            },
+            width: 640,
+            height: 480
+        });
+    }
+
+    start() {
+        this.camera.start();
+    }
+}
+
+/**
+ * 5. MAIN APP INITIALIZATION
+ */
+const state = new StateManager();
+const audio = new AudioController(state);
+const visuals = new VisualController(state, document.getElementById('canvas'));
+const input = new InputController(state, document.getElementById('video'));
+
+// App Loop (Render & Audio Update)
+function loop() {
+    audio.update();
+    visuals.update();
+    requestAnimationFrame(loop);
+}
+
+// User Interaction (Start)
+document.getElementById('startButton').addEventListener('click', () => {
+    document.getElementById('ui').style.display = 'none';
+    state.isActive = true;
+    audio.start();
+    input.start();
+    loop();
+});
+</script>
+</body>
+</html>
