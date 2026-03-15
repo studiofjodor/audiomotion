@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audiovisual Instrument - Stage 3</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; }
+        
+        #video { 
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; 
+            object-fit: cover; transform: scaleX(-1);
+            filter: blur(20px) brightness(0.2); z-index: 0;
+        }
+        
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; pointer-events: none; }
+        
+        #ui { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; text-align: center; }
+        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: rgba(255,255,255,0.9); color: #000; border: none; letter-spacing: 2px;}
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1 style="font-weight: 300; letter-spacing: 4px;">COSMIC GESTURES</h1>
+        <p style="color: #aaa;">Linke Hand: Daumen + Finger = Töne spielen (Höhe = Oktave)<br>Rechte Hand: Öffnen/Schließen = Chaos/Distortion | Höhe = Filter</p>
+        <button id="startButton">Initialize Engine</button>
+    </div>
+
+    <video id="video" autoplay playsinline></video>
+    <div id="canvas-container"></div>
+
+<script>
+/**
+ * Hilfsfunktion: Berechnet Distanz zwischen zwei 2D-Punkten
+ */
+function getDistance(p1, p2) {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+}
+
+/**
+ * 1. STATE MANAGER - Trackt nun individuelle Finger und Pinches
+ */
+class StateManager {
+    constructor() {
+        this.isActive = false;
+        
+        this.pitchState = {
+            handY: 0.5,
+            pinches: [false, false, false, false], // Index, Middle, Ring, Pinky
+            prevPinches: [false, false, false, false]
+        };
+        
+        this.modState = {
+            handY: 0.5,
+            spread: 0 // Distanz zwischen Daumen und kleinem Finger
+        };
+    }
+    
+    updateHands(landmarks) {
+        // Zustand für diese Frame kopieren, um Attack/Release Kanten zu finden
+        this.pitchState.prevPinches = [...this.pitchState.pinches];
+        
+        // Reset defaults if no hands
+        this.pitchState.pinches = [false, false, false, false];
+        let foundLeft = false;
+        let foundRight = false;
+        
+        if (landmarks && landmarks.length > 0) {
+            landmarks.forEach(hand => {
+                const centerX = hand[9].x;
+                const isLeftHandOnScreen = centerX > 0.5; // Gespiegelt! Screen Left = User Right
+                
+                if (isLeftHandOnScreen && !foundLeft) {
+                    foundLeft = true;
+                    this.pitchState.handY = hand[9].y;
+                    
+                    const thumb = hand[4];
+                    // Prüfe Distanz vom Daumen zu den 4 Fingerspitzen
+                    const PINCH_THRESHOLD = 0.05;
+                    this.pitchState.pinches[0] = getDistance(thumb, hand[8]) < PINCH_THRESHOLD;  // Index
+                    this.pitchState.pinches[1] = getDistance(thumb, hand[12]) < PINCH_THRESHOLD; // Middle
+                    this.pitchState.pinches[2] = getDistance(thumb, hand[16]) < PINCH_THRESHOLD; // Ring
+                    this.pitchState.pinches[3] = getDistance(thumb, hand[20]) < PINCH_THRESHOLD; // Pinky
+                } 
+                else if (!isLeftHandOnScreen && !foundRight) {
+                    foundRight = true;
+                    this.modState.handY = hand[9].y;
+                    
+                    // Spread = Distanz zwischen Daumen und kleinem Finger
+                    // Normalisiert auf 0.0 (geschlossen) bis 1.0 (weit offen)
+                    const rawSpread = getDistance(hand[4], hand[20]);
+                    this.modState.spread = Math.min(1.0, Math.max(0, (rawSpread - 0.05) * 2.5));
+                }
+            });
+        }
+    }
+}
+
+/**
+ * 2. AUDIO CONTROLLER - Polyphon mit Effekten basierend auf "Spread"
+ */
+class AudioController {
+    constructor(state) {
+        this.state = state;
+        
+        // PolySynth erlaubt das gleichzeitige Spielen mehrerer Finger
+        this.synth = new Tone.PolySynth(Tone.Synth, {
+            oscillator: { type: "triangle" },
+            envelope: { attack: 0.1, decay: 0.3, sustain: 0.6, release: 2.0 }
+        });
+        
+        // TouchDesigner-like Effekte
+        this.distortion = new Tone.Distortion(0.0); // Wird von Spread gesteuert
+        this.filter = new Tone.Filter(5000, "lowpass", -24); // Wird von Mod Y gesteuert
+        this.reverb = new Tone.Reverb({ decay: 5, wet: 0.6 });
+        this.delay = new Tone.FeedbackDelay("8n", 0.4);
+        
+        this.synth.chain(this.distortion, this.filter, this.delay, this.reverb, Tone.Destination);
+        
+        // Base Pentatonik: C, D, F, G (4 Finger = 4 Töne). Oktave variiert.
+        this.baseNotes = [130.81, 146.83, 174.61, 196.00]; 
+        
+        // Speichere aktuell gespielte Frequenzen um sie beim Release zu stoppen
+        this.activeFreqs = [null, null, null, null];
+    }
+
+    async start() {
+        await Tone.start();
+        await this.reverb.generate(); // Reverb benötigt eine kurze Init-Zeit
+    }
+
+    update() {
+        if (!this.state.isActive) return;
+
+        // --- HAND 1: PITCH (Finger Pinches) ---
+        // Y-Achse entscheidet über Oktave (0 = oben = hoch, 1 = unten = tief)
+        const octaveShift = this.state.pitchState.handY < 0.33 ? 2 : (this.state.pitchState.handY < 0.66 ? 1 : 0);
+        
+        for (let i = 0; i < 4; i++) {
+            const isPinching = this.state.pitchState.pinches[i];
+            const wasPinching = this.state.pitchState.prevPinches[i];
+            
+            if (isPinching && !wasPinching) {
+                // ATTACK: Finger hat sich gerade geschlossen
+                const freq = this.baseNotes[i] * Math.pow(2, octaveShift);
+                this.synth.triggerAttack(freq);
+                this.activeFreqs[i] = freq;
+            } 
+            else if (!isPinching && wasPinching) {
+                // RELEASE: Finger hat sich geöffnet
+                if (this.activeFreqs[i]) {
+                    this.synth.triggerRelease(this.activeFreqs[i]);
+                    this.activeFreqs[i] = null;
+                }
+            }
+        }
+
+        // --- HAND 2: MODULATION (Spread & Y-Axis) ---
+        // Y-Achse öffnet/schließt den großen Filter (wie beim DJing)
+        const filterCutoff = 200 + (1.0 - this.state.modState.handY) * 6000;
+        this.filter.frequency.rampTo(filterCutoff, 0.1);
+        
+        // Spread steuert Distortion (0 bis 0.8) für den "zerfetzten" Nebula-Sound
+        const distAmount = this.state.modState.spread * 0.8;
+        this.distortion.distortion = distAmount;
+    }
+}
+
+/**
+ * 3. VISUAL CONTROLLER - "Particles in Space"
+ */
+class VisualController {
+    constructor(state, container) {
+        this.state = state;
+        
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.camera.position.z = 80;
+        
+        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(this.renderer.domElement);
+
+        // --- 10.000 PARTIKEL GALAXY ---
+        const particleCount = 10000;
+        this.geometry = new THREE.BufferGeometry();
+        this.basePositions = new Float32Array(particleCount * 3); // Ursprungspositionen
+        const positions = new Float32Array(particleCount * 3);    // Aktuelle Positionen
+        const colors = new Float32Array(particleCount * 3);
+        const sizes = new Float32Array(particleCount);
+
+        const colorInner = new THREE.Color(0xffffff); // Core
+        const colorOuter = new THREE.Color(0x2244ff); // Edges
+
+        for (let i = 0; i < particleCount; i++) {
+            // Generiere Sphäre mit Dichte-Konzentration in der Mitte (Galaxy-Effekt)
+            const r = 20 * Math.pow(Math.random(), 2); 
+            const theta = Math.random() * 2 * Math.PI;
+            const phi = Math.acos((Math.random() * 2) - 1);
+
+            const x = r * Math.sin(phi) * Math.cos(theta);
+            const y = r * Math.sin(phi) * Math.sin(theta);
+            const z = r * Math.cos(phi);
+
+            this.basePositions[i*3] = x;
+            this.basePositions[i*3+1] = y;
+            this.basePositions[i*3+2] = z;
+
+            positions[i*3] = x;
+            positions[i*3+1] = y;
+            positions[i*3+2] = z;
+
+            // Farbe basierend auf Distanz zum Zentrum mischen
+            const mixedColor = colorInner.clone().lerp(colorOuter, r / 20);
+            colors[i*3] = mixedColor.r;
+            colors[i*3+1] = mixedColor.g;
+            colors[i*3+2] = mixedColor.b;
+            
+            sizes[i] = Math.random() * 1.5;
+        }
+
+        this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        this.geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+        // Custom Shader Material für leuchtende runde Punkte
+        this.material = new THREE.PointsMaterial({
+            size: 0.3,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            opacity: 0.8,
+            depthWrite: false
+        });
+        
+        this.particleSystem = new THREE.Points(this.geometry, this.material);
+        this.scene.add(this.particleSystem);
+
+        window.addEventListener('resize', () => this.resize());
+        this.time = 0;
+    }
+
+    resize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    update() {
+        if (!this.state.isActive) return;
+        this.time += 0.01;
+
+        // Visuelle Reaktionen berechnen
+        const anyPinch = this.state.pitchState.pinches.includes(true);
+        const spreadFactor = this.state.modState.spread; // 0 bis 1
+        
+        const positions = this.geometry.attributes.position.array;
+
+        // Animationsschleife für die Partikel
+        for (let i = 0; i < positions.length / 3; i++) {
+            const bx = this.basePositions[i*3];
+            const by = this.basePositions[i*3+1];
+            const bz = this.basePositions[i*3+2];
+
+            // 1. Grundrotation der Galaxie
+            const angle = this.time * 0.5 + Math.atan2(bx, bz);
+            const dist = Math.sqrt(bx*bx + bz*bz);
+            let targetX = Math.sin(angle) * dist;
+            let targetZ = Math.cos(angle) * dist;
+            let targetY = by;
+
+            // 2. Explosion durch "Spread" der rechten Hand
+            // Drückt Partikel entlang ihrer Normalen vom Zentrum weg
+            if (spreadFactor > 0.01) {
+                const explosionForce = spreadFactor * 15;
+                const forceX = (bx / dist) || 0;
+                const forceY = (by / Math.abs(by)) || 0;
+                const forceZ = (bz / dist) || 0;
+                
+                targetX += forceX * explosionForce * Math.sin(this.time * 5 + i);
+                targetY += forceY * explosionForce * Math.cos(this.time * 5 + i);
+                targetZ += forceZ * explosionForce * Math.sin(this.time * 5 + i);
+            }
+
+            // 3. Implosion / Flash durch "Pinch" der linken Hand
+            if (anyPinch) {
+                targetX *= 0.8;
+                targetY *= 0.8;
+                targetZ *= 0.8;
+                this.material.size = 0.6; // Punkte werden größer = heller
+            } else {
+                this.material.size = 0.2 + (spreadFactor * 0.4);
+            }
+
+            // Interpolation (Smoothing) zur Zielposition
+            positions[i*3] += (targetX - positions[i*3]) * 0.1;
+            positions[i*3+1] += (targetY - positions[i*3+1]) * 0.1;
+            positions[i*3+2] += (targetZ - positions[i*3+2]) * 0.1;
+        }
+
+        this.geometry.attributes.position.needsUpdate = true;
+        this.particleSystem.rotation.x = Math.sin(this.time * 0.2) * 0.5;
+        this.particleSystem.rotation.y = Math.cos(this.time * 0.1) * 0.2;
+
+        this.renderer.render(this.scene, this.camera);
+    }
+}
+
+/**
+ * 4. INPUT CONTROLLER - Liefert MediaPipe Hand-Landmarks
+ */
+class InputController {
+    constructor(state, videoElement) {
+        this.state = state;
+        this.video = videoElement;
+        
+        this.handsDetector = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        this.handsDetector.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        
+        this.handsDetector.onResults((results) => {
+            if (results.multiHandLandmarks) {
+                this.state.updateHands(results.multiHandLandmarks);
+            } else {
+                this.state.updateHands([]);
+            }
+        });
+
+        this.camera = new Camera(this.video, {
+            onFrame: async () => {
+                if(this.state.isActive) {
+                    await this.handsDetector.send({image: this.video});
+                }
+            },
+            width: 640,
+            height: 480
+        });
+    }
+
+    start() {
+        this.camera.start();
+    }
+}
+
+// Initialisierung
+const state = new StateManager();
+const audio = new AudioController(state);
+const visuals = new VisualController(state, document.getElementById('canvas-container'));
+const input = new InputController(state, document.getElementById('video'));
+
+function loop() {
+    audio.update();
+    visuals.update();
+    requestAnimationFrame(loop);
+}
+
+document.getElementById('startButton').addEventListener('click', async () => {
+    document.getElementById('ui').style.display = 'none';
+    state.isActive = true;
+    await audio.start(); // Wichtig für Audio-Context
+    input.start();
+    loop();
+});
+</script>
+</body>
+</html>
