@@ -3,387 +3,191 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audiovisual Instrument - Stage 4</title>
+    <title>Audiovisual Instrument - Stage 1.1</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js" crossorigin="anonymous"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <style>
-        body { margin: 0; overflow: hidden; background-color: #030508; color: white; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: #111; color: white; font-family: sans-serif; }
         
-        #video { 
-            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; 
-            object-fit: cover; transform: scaleX(-1);
-            filter: blur(25px) brightness(0.15); z-index: 0;
+        /* Video und Canvas gespiegelt für eine natürliche Instrumenten-Interaktion */
+        #video, #canvas { 
+            position: absolute; top: 0; left: 0; 
+            width: 100vw; height: 100vh; 
+            object-fit: cover; 
+            transform: scaleX(-1); /* Spiegelung! */
         }
         
-        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; pointer-events: none; }
+        /* Video schwach sichtbar fürs Debugging */
+        #video { z-index: 0; opacity: 0.3; display: block; }
+        #canvas { z-index: 1; }
         
         #ui { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; text-align: center; }
-        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: rgba(255,255,255,0.9); color: #000; border: none; letter-spacing: 2px; transition: 0.3s; }
-        button:hover { background: #fff; box-shadow: 0 0 20px rgba(255,255,255,0.5); }
+        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: #fff; color: #000; border: none; border-radius: 5px; }
     </style>
 </head>
 <body>
 
     <div id="ui">
-        <h1 style="font-weight: 300; letter-spacing: 6px;">AETHER</h1>
-        <p style="color: #aaa; margin-bottom: 30px;">
-            Linke Hand: Höhe = Ton | Hand öffnen = Lautstärke<br>
-            Rechte Hand: Höhe = Filter | Hand öffnen = Effekt-Intensität
-        </p>
-        <button id="startButton">Initialize Aether</button>
+        <h1>Audiovisual Instrument</h1>
+        <p>Erlaube den Kamera-Zugriff. Hebe deine Hand.</p>
+        <button id="startButton">Start Experience</button>
     </div>
 
-    <video id="video" autoplay playsinline></video>
-    <div id="canvas-container"></div>
+    <!-- Video ist nun sichtbar, aber transparent -->
+    <video id="video"></video>
+    <canvas id="canvas"></canvas>
 
 <script>
-// Lineare Interpolation für seidig weiches Tracking
-function lerp(start, end, amt) {
-    return (1 - amt) * start + amt * end;
-}
-
-/**
- * 1. STATE MANAGER - Trackt Position & Größe (Openness) der Hände
- */
 class StateManager {
     constructor() {
+        this.hands = [];
         this.isActive = false;
-        
-        // Smoothed Data
-        this.leftHand = { active: false, x: 0.5, y: 0.5, openness: 0 };
-        this.rightHand = { active: false, x: 0.5, y: 0.5, openness: 0 };
     }
-    
     updateHands(landmarks) {
-        let foundLeft = false;
-        let foundRight = false;
-        
-        if (landmarks && landmarks.length > 0) {
-            landmarks.forEach(hand => {
-                const centerX = hand[9].x;
-                const centerY = hand[9].y;
-                
-                // Openness: Distanz zwischen Handwurzel (0) und Mittelfinger-Spitze (12)
-                const wrist = hand[0];
-                const middleTip = hand[12];
-                const rawDistance = Math.sqrt(Math.pow(wrist.x - middleTip.x, 2) + Math.pow(wrist.y - middleTip.y, 2));
-                // Normalisieren: Faust ist ca. < 0.15, Offen ist ca. > 0.4
-                const openness = Math.min(1.0, Math.max(0.0, (rawDistance - 0.15) * 3.0));
-                
-                if (centerX > 0.5 && !foundLeft) { // Screen Left
-                    foundLeft = true;
-                    this.leftHand.active = true;
-                    this.leftHand.x = lerp(this.leftHand.x, centerX, 0.2);
-                    this.leftHand.y = lerp(this.leftHand.y, centerY, 0.2);
-                    this.leftHand.openness = lerp(this.leftHand.openness, openness, 0.15);
-                } 
-                else if (centerX <= 0.5 && !foundRight) { // Screen Right
-                    foundRight = true;
-                    this.rightHand.active = true;
-                    this.rightHand.x = lerp(this.rightHand.x, centerX, 0.2);
-                    this.rightHand.y = lerp(this.rightHand.y, centerY, 0.2);
-                    this.rightHand.openness = lerp(this.rightHand.openness, openness, 0.15);
-                }
-            });
-        }
-        
-        if (!foundLeft) {
-            this.leftHand.active = false;
-            this.leftHand.openness = lerp(this.leftHand.openness, 0, 0.1);
-        }
-        if (!foundRight) {
-            this.rightHand.active = false;
-            this.rightHand.openness = lerp(this.rightHand.openness, 0, 0.1);
-        }
+        this.hands = landmarks;
     }
 }
 
-/**
- * 2. AUDIO CONTROLLER - Expressiver Drone Synth
- */
 class AudioController {
     constructor(state) {
         this.state = state;
         
-        // Ein sehr fetter, warmer Drone-Synth
+        // FMSynth eignet sich hervorragend für fließende, organische Klänge
         this.synth = new Tone.FMSynth({
-            harmonicity: 1.5,
-            modulationIndex: 3.5,
+            harmonicity: 3,
+            modulationIndex: 10,
             oscillator: { type: "sine" },
-            modulation: { type: "sawtooth" }
+            modulation: { type: "square" },
+            envelope: { attack: 0.2, decay: 0.2, sustain: 0.8, release: 0.8 }
         });
         
-        // Volume Node wird durch "Openness" der linken Hand gesteuert
-        this.volumeNode = new Tone.Volume(-60); // Startet stumm
+        this.filter = new Tone.Filter(2000, "lowpass");
+        this.synth.connect(this.filter);
+        this.filter.toDestination();
         
-        // Filter und Effekte (Rechte Hand)
-        this.filter = new Tone.Filter(1000, "lowpass", -24);
-        this.delay = new Tone.FeedbackDelay("8n", 0.6);
-        this.reverb = new Tone.Reverb({ decay: 8, wet: 0 }); // Wet wird gesteuert
-        
-        this.synth.chain(this.volumeNode, this.filter, this.delay, this.reverb, Tone.Destination);
-        
-        // Pentatonik (D-Moll) über 2 Oktaven
-        this.scale = [146.83, 174.61, 196.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 523.25];
         this.isPlaying = false;
-        this.currentScaleIndex = -1;
+        this.currentFreq = null;
+
+        // C-Moll Pentatonik über 2 Oktaven
+        this.scale = [
+            130.81, // C3
+            155.56, // Eb3
+            174.61, // F3
+            196.00, // G3
+            233.08, // Bb3
+            261.63, // C4
+            311.13, // Eb4
+            349.23, // F4
+            392.00, // G4
+            466.16, // Bb4
+            523.25  // C5
+        ];
     }
 
-    async start() {
-        await Tone.start();
-        await this.reverb.generate();
+    start() {
+        Tone.start();
     }
 
     update() {
         if (!this.state.isActive) return;
 
-        // --- LINKE HAND: PITCH & VOLUME ---
-        if (this.state.leftHand.active) {
-            if (!this.isPlaying) {
-                this.synth.triggerAttack(this.scale[0]);
-                this.isPlaying = true;
-            }
-            
-            // Y-Achse (0 bis 1) quantisieren auf Skala
-            const normalizedY = Math.max(0, Math.min(1, this.state.leftHand.y));
-            const targetIndex = Math.floor((1.0 - normalizedY) * (this.scale.length - 1));
-            
-            if (targetIndex !== this.currentScaleIndex) {
-                const targetFreq = this.scale[targetIndex];
-                this.synth.frequency.rampTo(targetFreq, 0.1); // Sanftes gleiten (Portamento)
-                this.currentScaleIndex = targetIndex;
-            }
-            
-            // Lautstärke über Handöffnung (-60db bis 0db)
-            const vol = -40 + (this.state.leftHand.openness * 40);
-            this.volumeNode.volume.rampTo(vol, 0.1);
-            
-        } else {
-            // Wenn Hand weg ist, sanft ausfaden
-            this.volumeNode.volume.rampTo(-80, 0.5);
-            if (this.isPlaying && this.volumeNode.volume.value < -70) {
-                this.synth.triggerRelease();
-                this.isPlaying = false;
-                this.currentScaleIndex = -1;
-            }
-        }
+        if (this.state.hands.length > 0) {
+            const hand1 = this.state.hands[0];
+            const indexFinger = hand1[8]; 
 
-        // --- RECHTE HAND: MODULATION ---
-        if (this.state.rightHand.active) {
-            // Y-Achse: Filter (Oben = Hell, Unten = Dumpf)
-            const filterCutoff = 300 + (1.0 - this.state.rightHand.y) * 5000;
+            // Y-Achse auf die Skala mappen (0.0 ist oben/hoch, 1.0 ist unten/tief)
+            const normalizedY = Math.max(0, Math.min(1, indexFinger.y));
+            const scaleIndex = Math.floor((1.0 - normalizedY) * (this.scale.length - 1));
+            const targetFreq = this.scale[scaleIndex];
+            
+            // X-Achse steuert Filter (heller = weiter rechts im Spiegelbild)
+            const filterCutoff = 200 + (indexFinger.x * 5000);
+
+            if (!this.isPlaying) {
+                this.synth.triggerAttack(targetFreq);
+                this.isPlaying = true;
+                this.currentFreq = targetFreq;
+            } else if (this.currentFreq !== targetFreq) {
+                // Wenn wir eine neue "Zone" betreten, gleite sanft dorthin
+                this.synth.frequency.rampTo(targetFreq, 0.1);
+                this.currentFreq = targetFreq;
+            }
+            
             this.filter.frequency.rampTo(filterCutoff, 0.1);
             
-            // Openness: Delay/Reverb Intensität (Faust = Trocken, Offen = Massive Space)
-            const effectWetness = this.state.rightHand.openness * 0.8;
-            this.reverb.wet.rampTo(effectWetness, 0.1);
-            this.delay.wet.rampTo(effectWetness, 0.1);
         } else {
-            this.filter.frequency.rampTo(1000, 1.0);
-            this.reverb.wet.rampTo(0, 1.0);
-            this.delay.wet.rampTo(0, 1.0);
+            if (this.isPlaying) {
+                this.synth.triggerRelease();
+                this.isPlaying = false;
+                this.currentFreq = null;
+            }
         }
     }
 }
 
-/**
- * 3. VISUAL CONTROLLER - Massive Nebula & Hand-Indikatoren
- */
 class VisualController {
-    constructor(state, container) {
+    constructor(state, canvasElement) {
         this.state = state;
-        
-        this.scene = new THREE.Scene();
-        // Camera Setup
-        this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-        this.camera.position.z = 80;
-        
-        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        container.appendChild(this.renderer.domElement);
-
-        // --- HAND INDIKATOREN (Visuelles Feedback) ---
-        const handGeo = new THREE.SphereGeometry(2.5, 32, 32);
-        const handMat = new THREE.MeshBasicMaterial({ 
-            color: 0xffffff, 
-            wireframe: true, 
-            transparent: true, 
-            opacity: 0.5 
-        });
-        
-        this.leftMesh = new THREE.Mesh(handGeo, handMat);
-        this.rightMesh = new THREE.Mesh(handGeo, handMat.clone());
-        this.scene.add(this.leftMesh);
-        this.scene.add(this.rightMesh);
-
-        // --- NEBULA PARTIKEL ---
-        // Erzeuge eine weiche Textur für echten Nebel-Look
-        const sprite = this.createParticleTexture();
-        
-        const particleCount = 15000;
-        this.geometry = new THREE.BufferGeometry();
-        this.basePositions = new Float32Array(particleCount * 3);
-        const positions = new Float32Array(particleCount * 3);
-        const colors = new Float32Array(particleCount * 3);
-
-        const color1 = new THREE.Color(0x0088ff); // Cyan/Blau
-        const color2 = new THREE.Color(0xaa00ff); // Lila
-
-        for (let i = 0; i < particleCount; i++) {
-            // Große, weite Wolke
-            const x = (Math.random() - 0.5) * 120;
-            const y = (Math.random() - 0.5) * 80;
-            const z = (Math.random() - 0.5) * 60 - 20;
-
-            this.basePositions[i*3] = x;
-            this.basePositions[i*3+1] = y;
-            this.basePositions[i*3+2] = z;
-            positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
-
-            // Farben mischen
-            const mix = Math.random();
-            const c = color1.clone().lerp(color2, mix);
-            colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
-        }
-
-        this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-        this.material = new THREE.PointsMaterial({
-            size: 4.0, // Viel größer dank weicher Textur
-            map: sprite,
-            vertexColors: true,
-            blending: THREE.AdditiveBlending,
-            transparent: true,
-            opacity: 0.4,
-            depthWrite: false
-        });
-        
-        this.particleSystem = new THREE.Points(this.geometry, this.material);
-        this.scene.add(this.particleSystem);
-
+        this.canvas = canvasElement;
+        this.ctx = this.canvas.getContext('2d');
+        this.resize();
         window.addEventListener('resize', () => this.resize());
-        this.time = 0;
-    }
-
-    // Hilfsfunktion: Zeichnet radialen Verlauf auf Canvas für weiche Partikel
-    createParticleTexture() {
-        const canvas = document.createElement('canvas');
-        canvas.width = 64; canvas.height = 64;
-        const ctx = canvas.getContext('2d');
-        const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-        grad.addColorStop(0, 'rgba(255,255,255,1)');
-        grad.addColorStop(0.3, 'rgba(255,255,255,0.6)');
-        grad.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(0,0,64,64);
-        return new THREE.CanvasTexture(canvas);
     }
 
     resize() {
-        this.camera.aspect = window.innerWidth / window.innerHeight;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    // Wandelt 0-1 Koordinaten in die 3D Welt um
-    mapTo3DSpace(x, y) {
-        // scaleX(-1) wurde beim Video angewandt, daher (0.5 - x)
-        return { 
-            x: (0.5 - x) * 120, 
-            y: (0.5 - y) * 80 
-        };
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
     }
 
     update() {
+        // Motion-Blur-Effekt
+        this.ctx.fillStyle = 'rgba(17, 17, 17, 0.3)';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
         if (!this.state.isActive) return;
-        this.time += 0.005;
 
-        // 1. Hand Indikatoren updaten
-        if (this.state.leftHand.active) {
-            const pos = this.mapTo3DSpace(this.state.leftHand.x, this.state.leftHand.y);
-            this.leftMesh.position.set(pos.x, pos.y, 10);
-            // Größe skaliert mit Openness
-            const scale = 0.5 + this.state.leftHand.openness * 1.5;
-            this.leftMesh.scale.set(scale, scale, scale);
-            this.leftMesh.visible = true;
-            this.leftMesh.rotation.x += 0.02;
-            this.leftMesh.rotation.y += 0.03;
-        } else {
-            this.leftMesh.visible = false;
-        }
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        this.ctx.lineWidth = 2;
 
-        if (this.state.rightHand.active) {
-            const pos = this.mapTo3DSpace(this.state.rightHand.x, this.state.rightHand.y);
-            this.rightMesh.position.set(pos.x, pos.y, 10);
-            const scale = 0.5 + this.state.rightHand.openness * 1.5;
-            this.rightMesh.scale.set(scale, scale, scale);
-            this.rightMesh.visible = true;
-            this.rightMesh.rotation.x -= 0.02;
-            this.rightMesh.rotation.y -= 0.03;
-            // Die rechte Kugel färbt sich rot, je mehr Effekt an ist
-            this.rightMesh.material.color.setHSL(1.0, this.state.rightHand.openness, 1.0 - (this.state.rightHand.openness*0.5));
-        } else {
-            this.rightMesh.visible = false;
-        }
-
-        // 2. Nebula animieren (Wabernd und Interaktiv)
-        const positions = this.geometry.attributes.position.array;
-        
-        const leftPos = this.leftMesh.position;
-        const rightPos = this.rightMesh.position;
-
-        for (let i = 0; i < positions.length / 3; i++) {
-            const bx = this.basePositions[i*3];
-            const by = this.basePositions[i*3+1];
-            const bz = this.basePositions[i*3+2];
-
-            // Sanftes Driften des Nebels
-            let targetX = bx + Math.sin(this.time * 2 + by * 0.05) * 5;
-            let targetY = by + Math.cos(this.time * 2 + bx * 0.05) * 5;
-            let targetZ = bz;
-
-            // Interaktion: Hände "schieben" den Nebel leicht weg
-            if (this.state.leftHand.active) {
-                const dx = targetX - leftPos.x;
-                const dy = targetY - leftPos.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist < 20) {
-                    targetX += (dx / dist) * (20 - dist) * 0.5;
-                    targetY += (dy / dist) * (20 - dist) * 0.5;
-                }
-            }
-            if (this.state.rightHand.active) {
-                const dx = targetX - rightPos.x;
-                const dy = targetY - rightPos.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist < 20) {
-                    // Rechte Hand zieht den Nebel an, wenn sie offen ist (Schwarzes Loch Effekt)
-                    const pull = this.state.rightHand.openness;
-                    targetX -= (dx / dist) * (20 - dist) * pull * 0.8;
-                    targetY -= (dy / dist) * (20 - dist) * pull * 0.8;
-                }
+        this.state.hands.forEach(hand => {
+            // Handzentrum
+            if (hand[9]) {
+                const x = hand[9].x * this.canvas.width;
+                const y = hand[9].y * this.canvas.height;
+                
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, 60, 0, Math.PI * 2);
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+                this.ctx.fill();
+                this.ctx.stroke();
             }
 
-            positions[i*3] += (targetX - positions[i*3]) * 0.05;
-            positions[i*3+1] += (targetY - positions[i*3+1]) * 0.05;
-            positions[i*3+2] += (targetZ - positions[i*3+2]) * 0.05;
-        }
-
-        this.geometry.attributes.position.needsUpdate = true;
-        this.renderer.render(this.scene, this.camera);
+            // Zeigefinger
+            if (hand[8]) {
+                const ix = hand[8].x * this.canvas.width;
+                const iy = hand[8].y * this.canvas.height;
+                this.ctx.beginPath();
+                this.ctx.arc(ix, iy, 20, 0, Math.PI * 2);
+                this.ctx.fillStyle = 'white';
+                this.ctx.fill();
+                
+                // Zeichne eine Linie vom Zeigefinger zum Handzentrum
+                if (hand[9]) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(ix, iy);
+                    this.ctx.lineTo(hand[9].x * this.canvas.width, hand[9].y * this.canvas.height);
+                    this.ctx.stroke();
+                }
+            }
+        });
     }
 }
 
-/**
- * 4. INPUT CONTROLLER - Unverändert, robuster Feed
- */
 class InputController {
     constructor(state, videoElement) {
         this.state = state;
@@ -424,10 +228,9 @@ class InputController {
     }
 }
 
-// System Boot
 const state = new StateManager();
 const audio = new AudioController(state);
-const visuals = new VisualController(state, document.getElementById('canvas-container'));
+const visuals = new VisualController(state, document.getElementById('canvas'));
 const input = new InputController(state, document.getElementById('video'));
 
 function loop() {
@@ -436,10 +239,10 @@ function loop() {
     requestAnimationFrame(loop);
 }
 
-document.getElementById('startButton').addEventListener('click', async () => {
+document.getElementById('startButton').addEventListener('click', () => {
     document.getElementById('ui').style.display = 'none';
     state.isActive = true;
-    await audio.start(); 
+    audio.start();
     input.start();
     loop();
 });
