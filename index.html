@@ -3,90 +3,117 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audiovisual Instrument - Stage 1.1</title>
+    <title>Audiovisual Instrument - Stage 2</title>
     
+    <!-- Dependencies -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js" crossorigin="anonymous"></script>
+    <!-- Three.js hinzugefügt für 3D Partikel -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <style>
-        body { margin: 0; overflow: hidden; background-color: #111; color: white; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; }
         
-        /* Video und Canvas gespiegelt für eine natürliche Instrumenten-Interaktion */
-        #video, #canvas { 
+        /* Video im Hintergrund: gespiegelt, unscharf, abgedunkelt */
+        #video { 
             position: absolute; top: 0; left: 0; 
             width: 100vw; height: 100vh; 
             object-fit: cover; 
-            transform: scaleX(-1); /* Spiegelung! */
+            transform: scaleX(-1);
+            filter: blur(15px) brightness(0.4);
+            z-index: 0;
         }
         
-        /* Video schwach sichtbar fürs Debugging */
-        #video { z-index: 0; opacity: 0.3; display: block; }
-        #canvas { z-index: 1; }
+        /* Three.js Canvas transparent drüber */
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; pointer-events: none; }
         
         #ui { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; text-align: center; }
-        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: #fff; color: #000; border: none; border-radius: 5px; }
+        button { padding: 15px 30px; font-size: 1.2rem; cursor: pointer; background: rgba(255,255,255,0.9); color: #000; border: none; border-radius: 5px; text-transform: uppercase; letter-spacing: 2px;}
     </style>
 </head>
 <body>
 
     <div id="ui">
-        <h1>Audiovisual Instrument</h1>
-        <p>Erlaube den Kamera-Zugriff. Hebe deine Hand.</p>
-        <button id="startButton">Start Experience</button>
+        <h1 style="font-weight: 300; letter-spacing: 4px;">NEBULA INSTRUMENT</h1>
+        <p style="color: #aaa;">Linke Hand: Tonhöhe | Rechte Hand: Delay & Feedback</p>
+        <button id="startButton">Initialize Engine</button>
     </div>
 
-    <!-- Video ist nun sichtbar, aber transparent -->
-    <video id="video"></video>
-    <canvas id="canvas"></canvas>
+    <video id="video" autoplay playsinline></video>
+    <div id="canvas-container"></div>
 
 <script>
+/**
+ * 1. STATE MANAGER - Organisiert nun die Trennung der Hände
+ */
 class StateManager {
     constructor() {
-        this.hands = [];
         this.isActive = false;
+        this.pitchHand = null; // Steuert Musik
+        this.modHand = null;   // Steuert Effekte
+        
+        // Werte für die Visualisierung
+        this.currentPitchIntensity = 0; 
+        this.currentModIntensity = 0;
     }
+    
     updateHands(landmarks) {
-        this.hands = landmarks;
+        this.pitchHand = null;
+        this.modHand = null;
+        
+        if (landmarks && landmarks.length > 0) {
+            // Logik: Da das Video per CSS gespiegelt ist (scaleX(-1)):
+            // raw X < 0.5 ist auf dem Bildschirm RECHTS (User's linke Hand)
+            // raw X > 0.5 ist auf dem Bildschirm LINKS (User's rechte Hand)
+            landmarks.forEach(hand => {
+                const centerX = hand[9].x;
+                if (centerX > 0.5) {
+                    this.pitchHand = hand; // Screen Left
+                } else {
+                    this.modHand = hand; // Screen Right
+                }
+            });
+        }
     }
 }
 
+/**
+ * 2. AUDIO CONTROLLER - Jetzt mit komplexer Effekt-Kette
+ */
 class AudioController {
     constructor(state) {
         this.state = state;
         
-        // FMSynth eignet sich hervorragend für fließende, organische Klänge
+        // Ein wärmerer, vollerer Synth-Sound
         this.synth = new Tone.FMSynth({
-            harmonicity: 3,
-            modulationIndex: 10,
-            oscillator: { type: "sine" },
-            modulation: { type: "square" },
-            envelope: { attack: 0.2, decay: 0.2, sustain: 0.8, release: 0.8 }
+            harmonicity: 2,
+            modulationIndex: 5,
+            oscillator: { type: "sawtooth" },
+            modulation: { type: "sine" },
+            envelope: { attack: 0.5, decay: 0.2, sustain: 0.8, release: 2.0 }
         });
         
-        this.filter = new Tone.Filter(2000, "lowpass");
-        this.synth.connect(this.filter);
-        this.filter.toDestination();
+        // Der gewünschte Modulationseffekt: Ein PingPong/Feedback Delay
+        this.delay = new Tone.FeedbackDelay({
+            delayTime: "8n",
+            feedback: 0.2,
+            wet: 0.5
+        });
+        
+        // Tiefpassfilter um schrille Töne abzufedern
+        this.filter = new Tone.Filter(3000, "lowpass");
+        
+        // Routing
+        this.synth.chain(this.delay, this.filter, Tone.Destination);
         
         this.isPlaying = false;
         this.currentFreq = null;
 
-        // C-Moll Pentatonik über 2 Oktaven
-        this.scale = [
-            130.81, // C3
-            155.56, // Eb3
-            174.61, // F3
-            196.00, // G3
-            233.08, // Bb3
-            261.63, // C4
-            311.13, // Eb4
-            349.23, // F4
-            392.00, // G4
-            466.16, // Bb4
-            523.25  // C5
-        ];
+        // Pentatonische Skala (D-Moll)
+        this.scale = [146.83, 174.61, 196.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 523.25];
     }
 
     start() {
@@ -96,98 +123,169 @@ class AudioController {
     update() {
         if (!this.state.isActive) return;
 
-        if (this.state.hands.length > 0) {
-            const hand1 = this.state.hands[0];
-            const indexFinger = hand1[8]; 
-
-            // Y-Achse auf die Skala mappen (0.0 ist oben/hoch, 1.0 ist unten/tief)
+        // --- HAND 1: PITCH ---
+        if (this.state.pitchHand) {
+            const indexFinger = this.state.pitchHand[8];
             const normalizedY = Math.max(0, Math.min(1, indexFinger.y));
             const scaleIndex = Math.floor((1.0 - normalizedY) * (this.scale.length - 1));
             const targetFreq = this.scale[scaleIndex];
             
-            // X-Achse steuert Filter (heller = weiter rechts im Spiegelbild)
-            const filterCutoff = 200 + (indexFinger.x * 5000);
+            this.state.currentPitchIntensity = 1.0 - normalizedY;
 
             if (!this.isPlaying) {
                 this.synth.triggerAttack(targetFreq);
                 this.isPlaying = true;
                 this.currentFreq = targetFreq;
             } else if (this.currentFreq !== targetFreq) {
-                // Wenn wir eine neue "Zone" betreten, gleite sanft dorthin
-                this.synth.frequency.rampTo(targetFreq, 0.1);
+                this.synth.frequency.rampTo(targetFreq, 0.2);
                 this.currentFreq = targetFreq;
             }
-            
-            this.filter.frequency.rampTo(filterCutoff, 0.1);
-            
         } else {
             if (this.isPlaying) {
                 this.synth.triggerRelease();
                 this.isPlaying = false;
                 this.currentFreq = null;
+                this.state.currentPitchIntensity *= 0.9; // Fade out für visuals
             }
+        }
+
+        // --- HAND 2: MODULATION ---
+        if (this.state.modHand) {
+            const indexFinger = this.state.modHand[8];
+            
+            // X-Achse ändert Delay-Zeit (0.1s bis 0.8s)
+            const delayTime = 0.1 + (1.0 - indexFinger.x) * 0.7; 
+            // Y-Achse ändert Feedback (0.0 bis 0.85 für massive Hall-Fahnen)
+            const feedback = (1.0 - indexFinger.y) * 0.85;
+
+            this.delay.delayTime.rampTo(delayTime, 0.1);
+            this.delay.feedback.rampTo(feedback, 0.1);
+            
+            this.state.currentModIntensity = (1.0 - indexFinger.y);
+        } else {
+            this.delay.feedback.rampTo(0.2, 1.0); // Reset wenn Hand weg ist
+            this.state.currentModIntensity *= 0.95;
         }
     }
 }
 
+/**
+ * 3. VISUAL CONTROLLER - Three.js Partikel-Kugel
+ */
 class VisualController {
-    constructor(state, canvasElement) {
+    constructor(state, container) {
         this.state = state;
-        this.canvas = canvasElement;
-        this.ctx = this.canvas.getContext('2d');
-        this.resize();
+        
+        // Scene Setup
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.camera.position.z = 5;
+        
+        // Renderer mit transparentem Hintergrund (damit Video durchscheint)
+        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(this.renderer.domElement);
+
+        // --- DIE NEBEL-KUGEL ---
+        const geometry = new THREE.SphereGeometry(2, 64, 64);
+        const material = new THREE.PointsMaterial({ 
+            color: 0x88ccff, 
+            size: 0.02, 
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending 
+        });
+        
+        this.particleSphere = new THREE.Points(geometry, material);
+        this.scene.add(this.particleSphere);
+        
+        // Speichere Basis-Positionen für Audio-Verzerrung
+        this.basePositions = [];
+        const positions = this.particleSphere.geometry.attributes.position;
+        for(let i=0; i<positions.count; i++) {
+            this.basePositions.push(new THREE.Vector3(positions.getX(i), positions.getY(i), positions.getZ(i)));
+        }
+
+        // --- INTERAKTIONS-MARKER (Die Finger) ---
+        const markerGeo = new THREE.SphereGeometry(0.1, 16, 16);
+        const pitchMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+        const modMat = new THREE.MeshBasicMaterial({ color: 0xff5555, wireframe: true });
+        
+        this.pitchMarker = new THREE.Mesh(markerGeo, pitchMat);
+        this.modMarker = new THREE.Mesh(markerGeo, modMat);
+        this.scene.add(this.pitchMarker);
+        this.scene.add(this.modMarker);
+
         window.addEventListener('resize', () => this.resize());
+        this.time = 0;
     }
 
     resize() {
-        this.canvas.width = window.innerWidth;
-        this.canvas.height = window.innerHeight;
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Wandelt MediaPipe Koordinaten (0-1) in Three.js Raumkoordinaten um
+    mapTo3DSpace(landmark) {
+        // MediaPipe X: 0 (links), 1 (rechts). Da wir spiegeln: 1.0 - x
+        // MediaPipe Y: 0 (oben), 1 (unten).
+        const x = (0.5 - landmark.x) * 10; 
+        const y = (0.5 - landmark.y) * 7;
+        return { x, y };
     }
 
     update() {
-        // Motion-Blur-Effekt
-        this.ctx.fillStyle = 'rgba(17, 17, 17, 0.3)';
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
         if (!this.state.isActive) return;
+        this.time += 0.02;
 
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-        this.ctx.lineWidth = 2;
+        // 1. Kugel manipulieren (Reagiert auf Audio/Modulation)
+        const positions = this.particleSphere.geometry.attributes.position;
+        const modFactor = this.state.currentModIntensity * 2.0; // Wie stark der Nebel ausbricht
+        const pitchFactor = this.state.currentPitchIntensity * 5.0; // Wie schnell er pulsiert
 
-        this.state.hands.forEach(hand => {
-            // Handzentrum
-            if (hand[9]) {
-                const x = hand[9].x * this.canvas.width;
-                const y = hand[9].y * this.canvas.height;
-                
-                this.ctx.beginPath();
-                this.ctx.arc(x, y, 60, 0, Math.PI * 2);
-                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
-                this.ctx.fill();
-                this.ctx.stroke();
-            }
+        for(let i = 0; i < positions.count; i++) {
+            const basePos = this.basePositions[i];
+            
+            // Simpler Noise-Effekt durch Sinuswellen
+            const noise = Math.sin(basePos.x * 3 + this.time * pitchFactor) * 
+                          Math.cos(basePos.y * 3 + this.time) * 
+                          Math.sin(basePos.z * 3 + this.time);
+            
+            // Kugel dehnt sich basierend auf dem Delay/Modulations-Feedback aus
+            const displacement = 1 + (noise * 0.2 * modFactor);
 
-            // Zeigefinger
-            if (hand[8]) {
-                const ix = hand[8].x * this.canvas.width;
-                const iy = hand[8].y * this.canvas.height;
-                this.ctx.beginPath();
-                this.ctx.arc(ix, iy, 20, 0, Math.PI * 2);
-                this.ctx.fillStyle = 'white';
-                this.ctx.fill();
-                
-                // Zeichne eine Linie vom Zeigefinger zum Handzentrum
-                if (hand[9]) {
-                    this.ctx.beginPath();
-                    this.ctx.moveTo(ix, iy);
-                    this.ctx.lineTo(hand[9].x * this.canvas.width, hand[9].y * this.canvas.height);
-                    this.ctx.stroke();
-                }
-            }
-        });
+            positions.setXYZ(i, basePos.x * displacement, basePos.y * displacement, basePos.z * displacement);
+        }
+        positions.needsUpdate = true;
+        
+        // Langsame Grundrotation
+        this.particleSphere.rotation.y += 0.002;
+        this.particleSphere.rotation.x += 0.001;
+
+        // 2. Positionsmarker der Finger updaten
+        this.pitchMarker.visible = false;
+        this.modMarker.visible = false;
+
+        if (this.state.pitchHand) {
+            const pos = this.mapTo3DSpace(this.state.pitchHand[8]);
+            this.pitchMarker.position.set(pos.x, pos.y, 2); // Näher an Kamera
+            this.pitchMarker.visible = true;
+        }
+
+        if (this.state.modHand) {
+            const pos = this.mapTo3DSpace(this.state.modHand[8]);
+            this.modMarker.position.set(pos.x, pos.y, 2);
+            this.modMarker.visible = true;
+        }
+
+        this.renderer.render(this.scene, this.camera);
     }
 }
 
+/**
+ * 4. INPUT CONTROLLER - Unverändert, liefert Rohdaten
+ */
 class InputController {
     constructor(state, videoElement) {
         this.state = state;
@@ -228,9 +326,10 @@ class InputController {
     }
 }
 
+// System Init
 const state = new StateManager();
 const audio = new AudioController(state);
-const visuals = new VisualController(state, document.getElementById('canvas'));
+const visuals = new VisualController(state, document.getElementById('canvas-container'));
 const input = new InputController(state, document.getElementById('video'));
 
 function loop() {
